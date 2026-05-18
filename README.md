@@ -1,1 +1,5 @@
-# trading_firm
+streamlit
+pandas
+numpy
+plotly
+ccxt
