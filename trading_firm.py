@@ -5,28 +5,35 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.requests import MarketOrderRequest, ClosePositionRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 import yfinance as yf
 
 # ==========================================
 # 1. PREMIUM STYLING & TERMINAL CONFIG
 # ==========================================
-st.set_page_config(page_title="Hedge Terminal v2.0", layout="wide")
+st.set_page_config(page_title="Hedge Terminal v2.1", layout="wide")
 
-# Custom CSS to inject a clean dark trading desk aesthetic
 st.markdown("""
     <style>
         .block-container {padding-top: 1.5rem; padding-bottom: 0rem;}
         div[data-testid="stMetricValue"] {font-size: 24px; font-weight: bold; color: #00ffcc;}
         div[data-testid="stMetricLabel"] {font-size: 14px; color: #9aa0a6;}
-        .stButton>button {background-color: #00ffcc; color: #0c1017; font-weight: bold; width: 100%; border-radius: 6px;}
-        .stButton>button:hover {background-color: #00cc99; color: white;}
+        .deploy-btn>button {background-color: #00ffcc; color: #0c1017; font-weight: bold; width: 100%; border-radius: 6px;}
+        .deploy-btn>button:hover {background-color: #00cc99; color: white;}
+        .emergency-btn>button {background-color: #ff3366; color: white; font-weight: bold; width: 100%; border-radius: 6px;}
+        .emergency-btn>button:hover {background-color: #cc0033; color: white;}
     </style>
 """, unsafe_allow_html=True)
 
 st.title("⚡ QUANTUM: Autonomous Trading Desk")
 st.markdown("---")
+
+# Setup state variables
+if 'bot_running' not in st.session_state:
+    st.session_state.bot_running = False
+if 'trade_logs' not in st.session_state:
+    st.session_state.trade_logs = []
 
 # Secure Cloud Credentials Mapping
 openai_key_found = False
@@ -44,9 +51,10 @@ except Exception:
     connection_status = "🔴 OFFLINE (Check Secrets)"
     is_paper = True
 
-# Initialize Alpaca client data behind the scenes
+# Initialize Alpaca Client & Metrics
 portfolio_value, account_cash = 100000.00, 100000.00
 positions_data = []
+client = None
 
 if "🟢" in connection_status:
     try:
@@ -69,52 +77,139 @@ if "🟢" in connection_status:
         st.sidebar.error(f"Alpaca Sync Error: {err}")
 
 # ==========================================
-# 2. SIDEBAR CONFIGURATION (SLIDERS & WIDGETS)
+# 2. SIDEBAR CONFIGURATION
 # ==========================================
 st.sidebar.subheader("🛡️ SYSTEM SECURITY")
 st.sidebar.markdown(f"Core Broker Link: **{connection_status}**")
-if openai_key_found:
-    st.sidebar.markdown("AI Target Engine: **🟢 ACTIVE**")
-else:
-    st.sidebar.warning("⚠️ OpenAI Key Missing in Secrets")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("⚙️ CONTROL PROTOCOLS")
-
-# Dynamic Funds Slider: Cap your trading based on your live account balance
-max_allocatable_funds = float(portfolio_value)
-allocated_trading_limit = st.sidebar.slider(
-    "Max Fund Trading Limit ($ USD):",
-    min_value=10.0,
-    max_value=max_allocatable_funds,
-    value=min(2000.0, max_allocatable_funds),
-    step=10.0,
-    help="Set the absolute maximum ceiling of your cash balance the bot is allowed to access."
-)
-
 trade_allocation_usd = st.sidebar.number_input("Per-Order Size ($ USD):", min_value=5.0, max_value=500.0, value=21.50, step=1.0)
 ma_trigger_drop = st.sidebar.slider("Trigger Buy Drop (% below MA):", min_value=0.1, max_value=5.0, value=0.5, step=0.1)
 trigger_multiplier = 1 - (ma_trigger_drop / 100)
 
 # ==========================================
-# 3. LIVE POSITION DASHBOARD (MAIN ROW)
+# 3. MAIN DASHBOARD LIVE METRICS
 # ==========================================
 col1, col2, col3 = st.columns(3)
 col1.metric("Live Portfolio Equity", f"${portfolio_value:,.2f}")
 col2.metric("Available Cash Liquidity", f"${account_cash:,.2f}")
-col3.metric("Bot Capital Ceiling", f"${allocated_trading_limit:,.2f}")
+col3.metric("Bot Run Status", "RUNNING ALGORITHMS" if st.session_state.bot_running else "SYSTEMS IDLE")
 
 st.markdown("---")
 
 # ==========================================
-# 4. CHARTING ENGINE (CANDLESTICK TIMEFRAMES)
+# 4. STARTING CAPITAL INPUT BAR & ACTIONS
+# ==========================================
+st.subheader("🛠️ Run Execution Settings")
+
+# Input bar to type exactly how much money you want to hand to the bot
+starting_funds_input = st.number_input(
+    "Enter Starting Capital Limit for Trading ($ USD):",
+    min_value=10.0,
+    max_value=float(account_cash),
+    value=min(1000.0, float(account_cash)),
+    step=50.0,
+    help="Type the exact maximum cash balance size you want this session to allocate to your bot."
+)
+
+st.write("") # Formatting spacer
+
+# Styled Button Layout Row
+c1, c2, c3 = st.columns(3)
+
+with c1:
+    st.markdown('<div class="deploy-btn">', unsafe_allow_html=True)
+    if st.button("🚀 DEPLOY BOT ENGINE"):
+        if "🟢" in connection_status:
+            st.session_state.bot_running = True
+            st.success(f"Engine locked. Trading allocated up to ${starting_funds_input:.2f}")
+            time.sleep(1)
+            st.rerun()
+        else:
+            st.error("Cannot deploy. Link offline.")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+with c2:
+    if st.button("🛑 PAUSE MONITOR LOOPS"):
+        st.session_state.bot_running = False
+        st.warning("Automated trading scans temporarily paused.")
+        time.sleep(1)
+        st.rerun()
+
+with c3:
+    st.markdown('<div class="emergency-btn">', unsafe_allow_html=True)
+    if st.button("🚨 WITHDRAW & LIQUIDATE ALL"):
+        st.session_state.bot_running = False
+        if client:
+            with st.spinner("Canceling active tracks and converting assets back to cash..."):
+                try:
+                    # Fetch all tracked open positions and close them immediately via market orders
+                    active_positions = client.get_all_positions()
+                    closed_count = 0
+                    for pos in active_positions:
+                        if pos.symbol in ["TSLA", "ARKX"]:
+                            client.close_position(pos.symbol)
+                            closed_count += 1
+                    
+                    st.session_state.trade_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 🚨 EMERGENCY WITHDRAWAL EXECUTION: Closed {closed_count} tracking positions.")
+                    st.success("Withdrawal Complete! All open market positions closed out back to cash.")
+                    time.sleep(1.5)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Withdrawal Execution Error: {e}")
+        else:
+            st.error("Broker client connection missing. Unabled to send close trades sequence.")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# Active Strategy Processing Loop Block
+if st.session_state.bot_running:
+    status_box = st.empty()
+    
+    current_used_funds = 0.0
+    if client:
+        try:
+            current_positions = client.get_all_positions()
+            for p in current_positions:
+                if p.symbol in ["TSLA", "ARKX"]:
+                    current_used_funds += float(p.market_value)
+        except Exception:
+            pass
+        
+    if current_used_funds >= starting_funds_input:
+        status_box.warning(f"🛑 Capital Cap Reached: Transacted asset value (${current_used_funds:.2f}) meets your entered input budget limit (${starting_funds_input:.2f}). Scans idling.")
+    else:
+        status_box.info("🤖 Scanning dual streaming structural targets (TSLA & ARKX)...")
+        targets = ["TSLA", "ARKX"]
+        for ticker_symbol in targets:
+            try:
+                hist = yf.Ticker(ticker_symbol).history(period="5d", interval="1d")
+                if not hist.empty:
+                    current_price = float(hist['Close'].iloc[-1])
+                    moving_avg = float(hist['Close'].mean())
+                    
+                    if current_price < (moving_avg * trigger_multiplier):
+                        if (current_used_funds + trade_allocation_usd) <= starting_funds_input:
+                            order_data = MarketOrderRequest(
+                                symbol=ticker_symbol,
+                                notional=trade_allocation_usd,
+                                side=OrderSide.BUY,
+                                time_in_force=TimeInForce.DAY
+                            )
+                            client.submit_order(order_data=order_data)
+                            st.session_state.trade_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] Bought {ticker_symbol} at ${current_price:.2f}")
+                            st.rerun()
+            except Exception as loop_err:
+                st.error(f"Execution Error: {loop_err}")
+
+st.markdown("---")
+
+# ==========================================
+# 5. CHARTING ENGINE (CANDLESTICK)
 # ==========================================
 st.subheader("📊 Interactive Market Technical Matrix")
-
-# Multi-timeframe selector buttons
 timeframe = st.radio("Select Analytical Timeframe Interval:", ["Daily (24h Window)", "Monthly View", "Yearly View"], horizontal=True)
 
-# Map human selections to precise financial intervals
 if timeframe == "Daily (24h Window)":
     yf_period, yf_interval = "1d", "5m"
 elif timeframe == "Monthly View":
@@ -140,91 +235,25 @@ try:
             title=f"Live {selected_chart_ticker} {timeframe} Performance Feed",
             template="plotly_dark",
             xaxis_rangeslider_visible=False,
-            height=380,
+            height=340,
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(0,0,0,0)'
         )
         st.plotly_chart(fig, use_container_width=True)
 except Exception as e:
-    st.error(f"Error drawing chart data vectors: {e}")
-
-st.markdown("---")
+    st.error(f"Error drawing chart components: {e}")
 
 # ==========================================
-# 5. EXECUTION & ACTIVATION CORE BUTTONS
-# ==========================================
-st.subheader("⚙️ Mainframe Executive Commands")
-
-if 'bot_running' not in st.session_state:
-    st.session_state.bot_running = False
-
-c1, c2 = st.columns(2)
-with c1:
-    if st.button("🚀 DEPLOY BOT ENGINE"):
-        if "🟢" in connection_status:
-            st.session_state.bot_running = True
-            st.success("Mainframe execution sequence locked. Loop initialized.")
-        else:
-            st.error("Cannot deploy. Connection offline.")
-
-with c2:
-    if st.button("🛑 TERMINATE ALL ENGINE LOOPS"):
-        st.session_state.bot_running = False
-        st.warning("All automated algorithms systematically paused.")
-
-# Active Execution Core Loop Block
-if st.session_state.bot_running:
-    status_box = st.empty()
-    status_box.info("🤖 Executing sequence... Analyzing market standard indices.")
-    
-    # Check if total position valuation exceeds your custom Slider limit
-    current_used_funds = 0.0
-    try:
-        current_positions = client.get_all_positions()
-        for p in current_positions:
-            current_used_funds += float(p.market_value)
-    except Exception:
-        pass
-        
-    if current_used_funds >= allocated_trading_limit:
-        status_box.warning(f"🛑 Safe Cap Triggered: Total used funds (${current_used_funds:.2f}) equal or exceed slider safety ceiling (${allocated_trading_limit:.2f}). Orders paused.")
-    else:
-        targets = ["TSLA", "ARKX"]
-        for ticker_symbol in targets:
-            try:
-                hist = yf.Ticker(ticker_symbol).history(period="5d", interval="1d")
-                if not hist.empty:
-                    current_price = float(hist['Close'].iloc[-1])
-                    moving_avg = float(hist['Close'].mean())
-                    
-                    if current_price < (moving_avg * trigger_multiplier):
-                        # Final protection check before making the trade
-                        if (current_used_funds + trade_allocation_usd) <= allocated_trading_limit:
-                            order_data = MarketOrderRequest(
-                                symbol=ticker_symbol,
-                                notional=trade_allocation_usd,
-                                side=OrderSide.BUY,
-                                time_in_force=TimeInForce.DAY
-                            )
-                            client.submit_order(order_data=order_data)
-                            st.session_state.trade_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] Bought {ticker_symbol} at ${current_price:.2f}")
-                            st.rerun()
-            except Exception as loop_err:
-                st.error(f"Execution Error: {loop_err}")
-                
-        status_box.success("🟢 Monitoring Streams: Target variables balanced within optimal safety levels.")
-
-# ==========================================
-# 6. PORTFOLIO DATA TABLES
+# 6. PORTFOLIO DATA TABLES & LOGS
 # ==========================================
 st.markdown("---")
 st.subheader("💼 Active Asset Holdings")
 if positions_data:
     st.dataframe(pd.DataFrame(positions_data), use_container_width=True)
 else:
-    st.info("No active open stock positions tracked currently.")
+    st.info("No open target positions currently held in your tracking broker folder.")
 
-if 'trade_logs' in st.session_state and st.session_state.trade_logs:
+if st.session_state.trade_logs:
     st.subheader("📜 Terminal Command History Log")
     for log in reversed(st.session_state.trade_logs):
         st.text(log)
