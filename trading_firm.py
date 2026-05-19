@@ -1,144 +1,175 @@
 import os
-from datetime import datetime, timedelta
-import numpy as np
+import time
+from datetime import datetime
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
+import alpaca_trade_api as tradeapi
 import yfinance as yf
 
 # ==========================================
-# 1. PAGE SETUP & SECURITY
+# 1. PAGE SETUP & SECURE CLOUD LOADING
 # ==========================================
-st.set_page_config(page_title="Elon Musk Universe Portfolio", layout="wide")
+st.set_page_config(page_title="24/7 Cloud Trading Bot", layout="wide")
+st.title("🤖 Autonomous AI Trading Desk")
+st.markdown("This terminal runs entirely in the cloud, monitoring and executing trades safely.")
 
-st.title("⚡ AI Trading Firm: Live Portfolio & Daily Earnings")
-st.markdown("Tracking active deployments and historical performance within the Musk ecosystem.")
+# Check for OpenAI key in secrets FIRST
+openai_key_found = False
+OPENAI_API_KEY = ""
 
-# Sidebar API Input
-st.sidebar.header("Configuration")
-api_key = st.sidebar.text_input("OpenAI API Key", type="password")
+if "OPENAI_API_KEY" in st.secrets:
+    OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+    os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+    openai_key_found = True
+elif "openai" in st.secrets and "api_key" in st.secrets["openai"]:
+    OPENAI_API_KEY = st.secrets["openai"]["api_key"]
+    os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+    openai_key_found = True
 
-if api_key:
-    os.environ["OPENAI_API_KEY"] = api_key
+# Syncing Alpaca credentials securely
+try:
+    ALPACA_KEY = st.secrets["alpaca"]["api_key"]
+    ALPACA_SECRET = st.secrets["alpaca"]["api_secret"]
+    BASE_URL = st.secrets["alpaca"]["base_url"]
+    connection_status = "🟢 Connected Live to Broker Vault"
+except Exception:
+    connection_status = "🔴 Missing Cloud Secrets Configuration"
+    BASE_URL = "https://paper-api.alpaca.markets"
+
+# ==========================================
+# SIDEBAR CONFIGURATION & BACKUP API FIELDS
+# ==========================================
+st.sidebar.markdown(f"**System Status:** {connection_status}")
+st.sidebar.markdown("---")
+st.sidebar.header("⚙️ Configuration Hub")
+
+# BACKUP INPUT: If secrets fail, let you paste it directly into the UI safely
+if not openai_key_found:
+    st.sidebar.warning("⚠️ OpenAI Key not found in background Secrets vault.")
+    user_pasted_key = st.sidebar.text_input("Enter OpenAI API Key manually:", type="password")
+    if user_pasted_key:
+        OPENAI_API_KEY = user_pasted_key
+        os.environ["OPENAI_API_KEY"] = user_pasted_key
+        openai_key_found = True
 else:
-    st.sidebar.warning("🔑 Please enter your OpenAI API key to activate the agents.")
+    st.sidebar.success("🔮 OpenAI Core Engine: Active")
+
+# Strategy Controls
+trade_allocation_usd = st.sidebar.number_input("Order Limit ($ USD):", min_value=5.0, max_value=500.0, value=21.50, step=1.0)
+ma_trigger_drop = st.sidebar.slider("Trigger Buy Drop (% below MA):", min_value=0.1, max_value=5.0, value=0.5, step=0.1)
+trigger_multiplier = 1 - (ma_trigger_drop / 100)
 
 # ==========================================
-# 2. DATA CACHING & ENGINES
+# 2. STATE STORAGE & LIVE POSITION SYNC
 # ==========================================
-# Cache live data requests for 5 minutes so switching tabs or text entry doesn't break the UI
-@st.cache_data(ttl=300)
-def fetch_live_price(ticker, fallback_price):
+if 'trade_logs' not in st.session_state:
+    st.session_state.trade_logs = []
+if 'last_trade_time' not in st.session_state:
+    st.session_state.last_trade_time = {}
+
+portfolio_value, account_cash = 100000.00, 100000.00
+positions_data = []
+
+if "🟢" in connection_status:
     try:
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period="1d")
-        if not hist.empty:
-            return float(hist['Close'].iloc[-1])
-    except Exception:
-        pass
-    return float(fallback_price)
-
-# Initialize simulation tracking data safely inside Streamlit memory
-if 'portfolio' not in st.session_state:
-    st.session_state.portfolio = [
-        {"Ticker": "TSLA", "Shares": 150, "Avg Buy Price": 175.50, "Type": "Long Buy"},
-        {"Ticker": "ARKX", "Shares": 800, "Avg Buy Price": 14.20, "Type": "Long Buy"}
-    ]
-
-if 'history_df' not in st.session_state:
-    dates = [datetime.now() - timedelta(days=x) for x in range(30, -1, -1)]
-    np.random.seed(42)
-    daily_returns = np.random.normal(0.0015, 0.012, len(dates)) 
-    balance_history = [100000.0]
-    for r in daily_returns:
-        balance_history.append(balance_history[-1] * (1 + r))
-    
-    st.session_state.history_df = pd.DataFrame({
-        "Date": dates,
-        "Total Portfolio Value": balance_history[1:]
-    })
-
-# Process Portfolio Metrics via the cached fetcher
-updated_portfolio = []
-total_portfolio_value = 0.0
-total_cost_basis = 0.0
-
-for position in st.session_state.portfolio:
-    ticker = position["Ticker"]
-    live_price = fetch_live_price(ticker, position["Avg Buy Price"])
+        api = tradeapi.REST(key_id=ALPACA_KEY, secret_key=ALPACA_SECRET, base_url=BASE_URL, api_version='v2')
+        account = api.get_account()
+        portfolio_value, account_cash = float(account.equity), float(account.cash)
         
-    current_value = live_price * position["Shares"]
-    cost_basis = position["Avg Buy Price"] * position["Shares"]
-    profit_loss = current_value - cost_basis
-    
-    total_portfolio_value += current_value
-    total_cost_basis += cost_basis
-    
-    updated_portfolio.append({
-        "Asset": ticker,
-        "Position Type": position["Type"],
-        "Shares Held": position["Shares"],
-        "Avg Entry Price": f"${position['Avg Buy Price']:.2f}",
-        "Live Market Price": f"${live_price:.2f}",
-        "Current Value": f"${current_value:.2f}",
-        "Total Profit/Loss": f"${profit_loss:+.2f}"
-    })
+        alpaca_positions = api.list_positions()
+        for pos in alpaca_positions:
+            if pos.symbol in ["TSLA", "ARKX"]:
+                positions_data.append({
+                    "Asset": pos.symbol,
+                    "Shares Held": pos.qty,
+                    "Avg Entry": f"${float(pos.avg_entry_price):.2f}",
+                    "Live Market Price": f"${float(pos.current_price):.2f}",
+                    "Current Value": f"${float(pos.market_value):.2f}",
+                    "P&L": f"${float(pos.unrealized_pl):+.2f}"
+                })
+    except Exception as err:
+        st.sidebar.error(f"Sync Issue: {err}")
 
-# Compute final performance metrics
-total_profit_loss = total_portfolio_value - total_cost_basis
-daily_change_pct = ((st.session_state.history_df["Total Portfolio Value"].iloc[-1] / 
-                     st.session_state.history_df["Total Portfolio Value"].iloc[-2]) - 1) * 100
-daily_earnings_usd = total_portfolio_value * (daily_change_pct / 100)
+# Dashboard Top-level KPI block
+m1, m2 = st.columns(2)
+m1.metric("Cloud Account Equity", f"${portfolio_value:,.2f}")
+m2.metric("Available Liquidity (Cash)", f"${account_cash:,.2f}")
 
 # ==========================================
-# 3. HIGH LEVEL FINANCIAL KPI METRICS
+# 3. LIVE STRATEGY MONITOR LOOP
 # ==========================================
-st.subheader("📊 Live Account Metrics")
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Account Net Worth", f"${total_portfolio_value:,.2f}")
-m2.metric("Today's Earnings", f"${daily_earnings_usd:+.2f}", f"{daily_change_pct:+.2f}%")
-m3.metric("Total Accumulated Return", f"${total_profit_loss:+.2f}", f"{((total_portfolio_value/total_cost_basis)-1)*100:+.2f}%")
-m4.metric("Active Assets Trailed", len(updated_portfolio))
-
 st.markdown("---")
+st.subheader("⏱️ Live Strategy Monitor Loop")
 
-# ==========================================
-# 4. CHART OVERVIEW SECTION
-# ==========================================
-st.subheader("📈 Daily Performance Chart (Equities Growth)")
+# Verification Barrier Check
+if not openai_key_found:
+    st.error("🔒 Target verification paused: Please provide your OpenAI API Key in the sidebar or setup Secrets to re-verify targets.")
+else:
+    bot_active = st.checkbox("Activate Live Market Scanning Loop", value=False)
 
-fig = go.Figure()
-fig.add_trace(go.Scatter(
-    x=st.session_state.history_df["Date"], 
-    y=st.session_state.history_df["Total Portfolio Value"],
-    mode='lines+markers',
-    name='Net Worth ($)',
-    line=dict(color='#00e676', width=3),
-    fill='tozeroy',
-    fillcolor='rgba(0, 230, 118, 0.1)'
-))
-
-fig.update_layout(
-    template="plotly_dark",
-    xaxis_title="Timeline",
-    yaxis_title="Total Value ($USD)",
-    margin=dict(l=20, r=20, t=20, b=20),
-    height=400,
-    hovermode="x unified"
-)
-st.plotly_chart(fig, use_container_width=True)
-
-# ==========================================
-# 5. LIVE TRADES OPEN POSITIONS TABLE
-# ==========================================
-st.subheader("💼 Active Automated Positions")
-st.dataframe(pd.DataFrame(updated_portfolio), use_container_width=True)
-
-# ==========================================
-# 6. TRIGGER SYSTEM ANALYSIS BUTTON
-# ==========================================
-if st.button("🚀 Re-Run System Market Scan", use_container_width=True):
-    if not api_key:
-        st.error("Please provide your OpenAI API Key in the sidebar to re-verify targets.")
+    if bot_active and "🟢" in connection_status:
+        status_box = st.empty()
+        status_box.info("🤖 Bot initialized. Streaming dual data feeds for TSLA & ARKX...")
+        
+        targets = ["TSLA", "ARKX"]
+        card_cols = st.columns(len(targets))
+        
+        for i, ticker_symbol in enumerate(targets):
+            with card_cols[i]:
+                try:
+                    ticker = yf.Ticker(ticker_symbol)
+                    hist = ticker.history(period="5d", interval="1d")
+                    
+                    if not hist.empty:
+                        current_price = float(hist['Close'].iloc[-1])
+                        moving_avg = float(hist['Close'].mean())
+                        
+                        st.markdown(f"### Asset Profile: **{ticker_symbol}**")
+                        st.metric(label="Current Price", value=f"${current_price:.2f}", delta=f"5-Day MA: ${moving_avg:.2f}", delta_color="off")
+                        
+                        now = datetime.now()
+                        last_buy = st.session_state.last_trade_time.get(ticker_symbol)
+                        cooldown_ok = last_buy is None or (now - last_buy).total_seconds() > 300
+                        
+                        if current_price < (moving_avg * trigger_multiplier):
+                            if cooldown_ok:
+                                status_box.warning(f"🚨 {ticker_symbol} threshold breached! Purchasing...")
+                                api.submit_order(
+                                    symbol=ticker_symbol,
+                                    notional=trade_allocation_usd,  
+                                    side='buy',
+                                    type='market',
+                                    time_in_force='day'
+                                )
+                                st.session_state.last_trade_time[ticker_symbol] = now
+                                log_entry = f"[{now.strftime('%H:%M:%S')}] Automated Cloud Buy: Allocated ${trade_allocation_usd:.2f} to {ticker_symbol} at ${current_price:.2f}"
+                                st.session_state.trade_logs.append(log_entry)
+                                st.success(f"🎯 {ticker_symbol} order securely processed!")
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                st.info(f"⏳ {ticker_symbol} matches criteria, holding on cooldown.")
+                                
+                except Exception as loop_error:
+                    st.error(f"Error scanning {ticker_symbol}: {loop_error}")
+                    
+        status_box.success("⚖️ Market Scan Complete: Assets tracking within balanced parameters. Standing by...")
     else:
-        st.toast("Agents actively evaluating market variables...", icon="🔄")
+        st.info("System idling. Check the scanning loop box to start live tracking streams.")
+
+# Displays active holdings
+st.markdown("---")
+st.subheader("💼 Current Cloud Positions")
+if positions_data:
+    st.dataframe(pd.DataFrame(positions_data), use_container_width=True)
+else:
+    st.info("No active TSLA or ARKX holdings tracked currently.")
+
+# Display historical action logs
+st.subheader("📜 Bot Activity History Log")
+if st.session_state.trade_logs:
+    for log in reversed(st.session_state.trade_logs):
+        st.text(log)
+else:
+    st.write("No trade actions executed during this session.")
+    
