@@ -3,7 +3,9 @@ import time
 from datetime import datetime
 import pandas as pd
 import streamlit as st
-import alpaca_trade_api as tradeapi
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.enums import OrderSide, TimeInForce
 import yfinance as yf
 
 # ==========================================
@@ -31,10 +33,12 @@ try:
     ALPACA_KEY = st.secrets["alpaca"]["api_key"]
     ALPACA_SECRET = st.secrets["alpaca"]["api_secret"]
     BASE_URL = st.secrets["alpaca"]["base_url"]
+    # Adjust base_url format if needed for modern SDK
+    is_paper = "paper" in BASE_URL.lower()
     connection_status = "🟢 Connected Live to Broker Vault"
 except Exception:
     connection_status = "🔴 Missing Cloud Secrets Configuration"
-    BASE_URL = "https://paper-api.alpaca.markets"
+    is_paper = True
 
 # ==========================================
 # SIDEBAR CONFIGURATION & BACKUP API FIELDS
@@ -43,7 +47,6 @@ st.sidebar.markdown(f"**System Status:** {connection_status}")
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Configuration Hub")
 
-# BACKUP INPUT: If secrets fail, let you paste it directly into the UI safely
 if not openai_key_found:
     st.sidebar.warning("⚠️ OpenAI Key not found in background Secrets vault.")
     user_pasted_key = st.sidebar.text_input("Enter OpenAI API Key manually:", type="password")
@@ -72,11 +75,12 @@ positions_data = []
 
 if "🟢" in connection_status:
     try:
-        api = tradeapi.REST(key_id=ALPACA_KEY, secret_key=ALPACA_SECRET, base_url=BASE_URL, api_version='v2')
-        account = api.get_account()
+        # Initialize modern trading client
+        client = TradingClient(api_key=ALPACA_KEY, secret_key=ALPACA_SECRET, paper=is_paper)
+        account = client.get_account()
         portfolio_value, account_cash = float(account.equity), float(account.cash)
         
-        alpaca_positions = api.list_positions()
+        alpaca_positions = client.get_all_positions()
         for pos in alpaca_positions:
             if pos.symbol in ["TSLA", "ARKX"]:
                 positions_data.append({
@@ -101,7 +105,6 @@ m2.metric("Available Liquidity (Cash)", f"${account_cash:,.2f}")
 st.markdown("---")
 st.subheader("⏱️ Live Strategy Monitor Loop")
 
-# Verification Barrier Check
 if not openai_key_found:
     st.error("🔒 Target verification paused: Please provide your OpenAI API Key in the sidebar or setup Secrets to re-verify targets.")
 else:
@@ -134,13 +137,16 @@ else:
                         if current_price < (moving_avg * trigger_multiplier):
                             if cooldown_ok:
                                 status_box.warning(f"🚨 {ticker_symbol} threshold breached! Purchasing...")
-                                api.submit_order(
+                                
+                                # Modern order submission format
+                                order_data = MarketOrderRequest(
                                     symbol=ticker_symbol,
-                                    notional=trade_allocation_usd,  
-                                    side='buy',
-                                    type='market',
-                                    time_in_force='day'
+                                    notional=trade_allocation_usd,
+                                    side=OrderSide.BUY,
+                                    time_in_force=TimeInForce.DAY
                                 )
+                                client.submit_order(order_data=order_data)
+                                
                                 st.session_state.last_trade_time[ticker_symbol] = now
                                 log_entry = f"[{now.strftime('%H:%M:%S')}] Automated Cloud Buy: Allocated ${trade_allocation_usd:.2f} to {ticker_symbol} at ${current_price:.2f}"
                                 st.session_state.trade_logs.append(log_entry)
@@ -172,4 +178,3 @@ if st.session_state.trade_logs:
         st.text(log)
 else:
     st.write("No trade actions executed during this session.")
-    
