@@ -5,14 +5,14 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, ClosePositionRequest
+from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 import yfinance as yf
 
 # ==========================================
 # 1. PREMIUM STYLING & TERMINAL CONFIG
 # ==========================================
-st.set_page_config(page_title="Hedge Terminal v2.1", layout="wide")
+st.set_page_config(page_title="Hedge Terminal v2.2", layout="wide")
 
 st.markdown("""
     <style>
@@ -76,6 +76,13 @@ if "🟢" in connection_status:
     except Exception as err:
         st.sidebar.error(f"Alpaca Sync Error: {err}")
 
+# Calculate exactly how much money is currently tied up in stock positions
+current_used_funds = 0.0
+for pos in positions_data:
+    # Convert clean currency strings back to floats for computational safety
+    val_str = pos["Total Value"].replace('$', '').replace(',', '')
+    current_used_funds += float(val_str)
+
 # ==========================================
 # 2. SIDEBAR CONFIGURATION
 # ==========================================
@@ -107,13 +114,13 @@ st.subheader("🛠️ Run Execution Settings")
 starting_funds_input = st.number_input(
     "Enter Starting Capital Limit for Trading ($ USD):",
     min_value=10.0,
-    max_value=float(account_cash),
-    value=min(1000.0, float(account_cash)),
+    max_value=float(portfolio_value),
+    value=max(2000.0, current_used_funds + 500.0), # Intelligently scales default value to avoid instant loop errors
     step=50.0,
     help="Type the exact maximum cash balance size you want this session to allocate to your bot."
 )
 
-st.write("") # Formatting spacer
+st.write("") # Formatting space break
 
 # Styled Button Layout Row
 c1, c2, c3 = st.columns(3)
@@ -159,27 +166,22 @@ with c3:
                 except Exception as e:
                     st.error(f"Withdrawal Execution Error: {e}")
         else:
-            st.error("Broker client connection missing. Unabled to send close trades sequence.")
+            st.error("Broker client connection missing. Unable to send close trades sequence.")
     st.markdown('</div>', unsafe_allow_html=True)
 
 # Active Strategy Processing Loop Block
 if st.session_state.bot_running:
     status_box = st.empty()
     
-    current_used_funds = 0.0
-    if client:
-        try:
-            current_positions = client.get_all_positions()
-            for p in current_positions:
-                if p.symbol in ["TSLA", "ARKX"]:
-                    current_used_funds += float(p.market_value)
-        except Exception:
-            pass
-        
+    # Check if currently held investments meet or exceed our session limits
     if current_used_funds >= starting_funds_input:
-        status_box.warning(f"🛑 Capital Cap Reached: Transacted asset value (${current_used_funds:.2f}) meets your entered input budget limit (${starting_funds_input:.2f}). Scans idling.")
+        status_box.warning(
+            f"🛑 Capital Cap Active: Your current transacted asset allocation position values (${current_used_funds:,.2f}) "
+            f"meet or exceed your chosen input session budget ceiling limit (${starting_funds_input:,.2f}). "
+            f"Scanner loops are idling safely to prevent over-leverage."
+        )
     else:
-        status_box.info("🤖 Scanning dual streaming structural targets (TSLA & ARKX)...")
+        status_box.info("🤖 Scanning structural targets (TSLA & ARKX)...")
         targets = ["TSLA", "ARKX"]
         for ticker_symbol in targets:
             try:
